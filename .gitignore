@@ -1,0 +1,83 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+.vite/
+*.tsbuildinfo
+
+# Cloudflare / Wrangler local state
+.wrangler/
+worker/.wrangler/
+.mf/
+.mf-*/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+known_hosts
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime and cache files
+.cache/
+.parcel-cache/
+.turbo/
+.next/
+.nuxt/
+.output/
+coverage/
+.nyc_output/
+
+# Rust
+target/
+rust-gateway/target/
+**/*.rs.bk
+
+# Editor / IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*.swn
+*~
+
+# OS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
