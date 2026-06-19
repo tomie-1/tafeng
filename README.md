@@ -1,6 +1,6 @@
 # 踏风 Tafeng
 
-踏风是一个面向 Cloudflare Worker 部署的 WebSSH 工作台原型，使用 React + Vite + TypeScript 构建。项目采用纯 Worker 架构：前端静态资源、认证、设置、连接管理、命令历史、文件接口、WebSocket 终端桥接都由 Cloudflare Worker 承载。
+踏风是一个面向 Cloudflare Worker 部署的 WebSSH 工作台，使用 React + Vite + TypeScript 构建。项目采用纯 Worker 架构：前端静态资源、认证、设置、连接管理、命令历史、SFTP 文件管理、WebSocket 终端桥接都由 Cloudflare Worker 承载。
 
 English documentation: [Readme_EN.md](./Readme_EN.md)
 
@@ -10,16 +10,16 @@ English documentation: [Readme_EN.md](./Readme_EN.md)
 - 支持保存 VPS 连接信息：IP / 域名、端口、用户名、密码或私钥。
 - 首页管理密码登录，设置中可开启两步验证。
 - 中文 / English 双语界面。
-- 文件列表、文本配置编辑器、上传和下载接口。
+- SFTP 文件浏览、文本编辑器、上传和下载。
 - 上传接口设计上限为 10G。
 - 连接后显示 CPU、内存、Swap、硬盘使用情况和进程列表。
 - 全局命令历史记录，所有 VPS 共用，最多保存 100000 条。
 - Cloudflare Worker + KV + R2 部署结构。
-- 后续真实 SSH/SFTP 接入统一走 Worker TCP Socket 方案。
+- 真实 SSH/SFTP 通过 Worker TCP Socket（`cloudflare:sockets`）和 `ssh2` 库接入。
 
-## 当前状态说明
+## 当前状态
 
-当前项目已完成前端、Worker API、认证、设置、连接管理、命令历史、SFTP 文件管理和监控面板。真实 SSH/SFTP 协议已通过 Cloudflare Worker 的 `cloudflare:sockets` TCP Socket API 接入，所有连接在 Worker 内完成协议桥接。
+项目已完成前端、Worker API、认证、设置、连接管理、命令历史、SFTP 文件管理和监控面板。SSH/SFTP 协议通过 Cloudflare Worker 的 `cloudflare:sockets` TCP Socket API 和 `ssh2` 库接入，所有连接在 Worker 内完成协议桥接。
 
 > **⚠️ 重要提示：每次代码更新触发自动重新部署后，需要在 Cloudflare Dashboard 中重新绑定 KV 和 R2。** 因为 `wrangler.toml` 中没有写入 KV/R2 的绑定 ID，每次 `wrangler deploy` 会用本地配置覆盖远程配置，导致之前在 Dashboard 中手动添加的 KV 和 R2 绑定丢失。请参考下方「更新代码后重新绑定」章节。
 
@@ -476,27 +476,27 @@ https://tafeng.your-subdomain.workers.dev
 4. 进入 Settings。
 5. 在 Domains & Routes 中添加自定义域名或路由。
 
-## 真实 SSH/SFTP 接入路线
+## SSH/SFTP 实现架构
 
-项目现在保留的是 Worker 内适配层：
+SSH 和 SFTP 功能在 Worker 内完整实现，核心代码位于：
 
 ```text
 worker/sshBridge.ts
 ```
 
-接入真实 SSH 时建议这样做：
+实现方式：
 
-1. 在 Worker WebSocket 中接收浏览器终端输入。
-2. 在 Worker 内使用 `cloudflare:sockets` 的 `connect()` 创建到 VPS `host:22` 的出站 TCP 连接。
-3. 在 Worker 内实现或引入可用的 SSH 协议适配逻辑。
-4. 将浏览器 WebSocket 数据和 SSH TCP Socket 数据互相转发。
-5. SFTP 文件传输也走同一个 Worker 适配层，必要时配合 R2 做临时对象中转。
+1. 浏览器通过 WebSocket 连接到 Worker。
+2. Worker 使用 `cloudflare:sockets` 的 `connect()` 创建到 VPS `host:22` 的出站 TCP 连接。
+3. Worker 使用 `ssh2` 库完成 SSH 协议握手、认证和会话管理。
+4. 浏览器 WebSocket 数据和 SSH TCP Socket 数据在 Worker 内双向桥接。
+5. SFTP 会话在 SSH 连接建立后自动创建，支持文件浏览、读写、上传和下载。
 
 注意事项：
 
 - Worker 只能创建出站 TCP 连接，不能像传统服务器一样监听任意 TCP 端口。
-- 真实 SSH 协议、SFTP、大文件传输和长连接要注意 Worker 限制、超时、内存和并发连接数量。
-- 10G 大文件建议先写入 R2，再由 Worker 分段处理或任务化处理，避免一次性读入内存。
+- SSH 长连接需要注意 Worker 超时、内存和并发连接数量限制。
+- SFTP 下载限制为 100MB，文本编辑限制为 2MB。
 
 ## 两步验证
 
@@ -531,24 +531,27 @@ TOTP 密钥会保存在 `TAFENG_KV` 中。生成二维码时会先保存一个 1
 
 ## 文件上传下载
 
-上传接口位于：
+踏风支持两种文件传输方式：
+
+### SFTP 文件传输
+
+通过 WebSocket 的 SFTP 会话直接与 VPS 交互：
+
+- **浏览目录**：前端发送 `sftp-ls` 消息，Worker 通过 SFTP 读取远程目录。
+- **读取文件**：支持读取最大 2MB 的文本文件进行在线编辑。
+- **写入文件**：在线编辑后直接保存到 VPS。
+- **上传文件**：浏览器将文件分块（64KB）Base64 编码后通过 WebSocket 流式写入 VPS。
+- **下载文件**：Worker 通过 SFTP 流式读取文件（最大 100MB），Base64 编码后发送到浏览器。
+
+### R2 文件上传
+
+上传接口：
 
 ```text
 POST /api/files/upload
 ```
 
-当前 Worker 会检查 `Content-Length`，超过 10G 会返回 `413`。文件内容会写入 R2 Bucket：
-
-```text
-TAFENG_FILES
-```
-
-真实 SFTP 上传下载接入后，建议流程为：
-
-1. 浏览器上传到 Worker。
-2. Worker 将大文件流式写入 R2 临时对象。
-3. Worker 的 SSH/SFTP 适配层从 R2 读取并上传到 VPS。
-4. 任务完成后删除临时对象。
+Worker 检查 `Content-Length`，超过 10G 返回 `413`。文件内容写入 R2 Bucket `TAFENG_FILES`。
 
 ## 命令历史记录
 
@@ -597,7 +600,7 @@ src/lib/i18n.ts
 - 限制 Worker 访问来源或增加额外访问控制。
 - 定期清理不需要的命令历史。
 - 为 R2 临时上传对象设置清理策略。
-- 真实 SSH 接入时做好连接超时、命令审计和错误处理。
+- 注意 SSH 连接超时、命令审计和错误处理。
 
 ## 常用命令
 
@@ -655,9 +658,9 @@ R2 bucket: tafeng-files
 
 绑定名必须是 `TAFENG_FILES`，大小写不能变。
 
-### 4. 终端现在没有连接真实 VPS
+### 4. 终端连接 VPS 超时或失败
 
-这是当前原型的预期行为。真实 SSH/SFTP 需要在 [worker/sshBridge.ts](./worker/sshBridge.ts) 中接入 Worker TCP Socket 和 SSH 协议逻辑。
+请检查 VPS 的 IP/域名、端口、用户名和凭据是否正确。Worker 使用出站 TCP 连接到 VPS 的 SSH 端口（默认 22），确保 VPS 防火墙允许来自 Cloudflare IP 段的入站连接。当前 SSH 连接超时为 20 秒。
 
 ### 5. 命令历史是否按 VPS 隔离
 

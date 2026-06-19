@@ -1,6 +1,6 @@
 # Tafeng
 
-Tafeng is a WebSSH workspace prototype designed for Cloudflare Workers. It is built with React, Vite, and TypeScript. The project now uses a pure Worker architecture: static frontend assets, authentication, settings, connection management, command history, file APIs, and WebSocket terminal bridging are all handled by Cloudflare Worker.
+Tafeng is a WebSSH workspace designed for Cloudflare Workers. It is built with React, Vite, and TypeScript. The project uses a pure Worker architecture: static frontend assets, authentication, settings, connection management, command history, SFTP file management, and WebSocket terminal bridging are all handled by Cloudflare Worker.
 
 Chinese documentation: [README.md](./README.md)
 
@@ -11,16 +11,16 @@ Chinese documentation: [README.md](./README.md)
 - Admin-password login on the home page.
 - Optional two-factor authentication setting.
 - Chinese and English UI.
-- File listing, text config editor, upload and download API placeholders.
+- SFTP file browsing, text editor, upload, and download.
 - Upload API designed for files up to 10 GB.
 - Live CPU, memory, swap, disk usage, and process list panels.
 - Global command history across all VPS connections, up to 100000 entries.
 - Cloudflare Worker + KV + R2 deployment structure.
-- Future real SSH/SFTP integration is expected to use Worker TCP Socket.
+- Real SSH/SFTP via Worker TCP Socket (`cloudflare:sockets`) and the `ssh2` library.
 
 ## Current Status
 
-The project includes the frontend, Worker APIs, authentication, settings, connection management, command history, SFTP file management, and monitoring panel. Real SSH/SFTP protocol integration uses Cloudflare Worker's `cloudflare:sockets` TCP Socket API, with all connections bridged inside the Worker.
+The project includes the frontend, Worker APIs, authentication, settings, connection management, command history, SFTP file management, and monitoring panel. SSH/SFTP protocol integration uses Cloudflare Worker's `cloudflare:sockets` TCP Socket API and the `ssh2` library, with all connections bridged inside the Worker.
 
 > **⚠️ Important: After each code update triggers an automatic redeployment, you must rebind KV and R2 in the Cloudflare Dashboard.** Because `wrangler.toml` does not include KV/R2 binding IDs, each `wrangler deploy` overwrites the remote configuration, removing any manually added KV and R2 bindings. See the "Rebinding After Code Updates" section below.
 
@@ -477,27 +477,27 @@ You can bind a custom domain in the Cloudflare Dashboard:
 4. Open Settings.
 5. Add a custom domain or route under Domains & Routes.
 
-## Real SSH/SFTP Integration Path
+## SSH/SFTP Architecture
 
-The Worker-side adapter lives here:
+SSH and SFTP are fully implemented inside the Worker. The core code lives here:
 
 ```text
 worker/sshBridge.ts
 ```
 
-For real SSH integration:
+How it works:
 
-1. Receive browser terminal input through the Worker WebSocket.
-2. Use `connect()` from `cloudflare:sockets` inside the Worker to open an outbound TCP connection to the VPS `host:22`.
-3. Implement or integrate SSH protocol handling inside the Worker.
-4. Pipe browser WebSocket data and SSH TCP Socket data in both directions.
-5. Implement SFTP in the same Worker adapter layer. Use R2 as temporary object storage when needed.
+1. The browser connects to the Worker via WebSocket.
+2. The Worker uses `connect()` from `cloudflare:sockets` to open an outbound TCP connection to the VPS `host:22`.
+3. The Worker uses the `ssh2` library for SSH protocol handshake, authentication, and session management.
+4. Browser WebSocket data and SSH TCP Socket data are bridged bidirectionally inside the Worker.
+5. An SFTP session is created automatically after the SSH connection is established, supporting file browsing, reading, writing, uploading, and downloading.
 
 Notes:
 
 - Workers can create outbound TCP connections, but they do not behave like traditional servers listening on arbitrary TCP ports.
-- Real SSH, SFTP, large files, and long-lived sessions must account for Worker limits, timeouts, memory, and concurrent open connections.
-- For 10 GB files, write to R2 first and process the transfer in chunks or tasks. Do not read the whole file into memory.
+- Long-lived SSH sessions must account for Worker timeouts, memory, and concurrent connection limits.
+- SFTP downloads are limited to 100 MB and text editing to 2 MB.
 
 ## Two-Factor Authentication
 
@@ -532,24 +532,27 @@ Related files:
 
 ## File Upload and Download
 
+Tafeng supports two file transfer methods:
+
+### SFTP File Transfer
+
+Files are transferred directly to/from the VPS through the WebSocket SFTP session:
+
+- **Browse directories**: The frontend sends an `sftp-ls` message; the Worker reads the remote directory via SFTP.
+- **Read files**: Text files up to 2 MB can be read for online editing.
+- **Write files**: Edited content is saved directly to the VPS.
+- **Upload files**: The browser splits files into 64 KB chunks, Base64-encodes them, and streams them to the VPS via WebSocket.
+- **Download files**: The Worker reads files via SFTP streaming (up to 100 MB), Base64-encodes the data, and sends it to the browser.
+
+### R2 File Upload
+
 Upload endpoint:
 
 ```text
 POST /api/files/upload
 ```
 
-The Worker checks `Content-Length` and returns `413` for files larger than 10 GB. Uploaded content is written to the R2 bucket:
-
-```text
-TAFENG_FILES
-```
-
-Recommended flow after real SFTP integration:
-
-1. Browser uploads to the Worker.
-2. Worker streams the large file into a temporary R2 object.
-3. The Worker SSH/SFTP adapter reads from R2 and uploads to the VPS.
-4. Temporary R2 objects are deleted after completion.
+The Worker checks `Content-Length` and returns `413` for files larger than 10 GB. Uploaded content is written to the R2 bucket `TAFENG_FILES`.
 
 ## Command History
 
@@ -598,7 +601,7 @@ Before production deployment:
 - Restrict Worker access or add additional access control if needed.
 - Periodically clear unnecessary command history.
 - Add cleanup rules for temporary R2 upload objects.
-- Add connection timeouts, command auditing, and robust error handling for real SSH integration.
+- Review SSH connection timeouts, command auditing, and error handling.
 
 ## Common Commands
 
@@ -656,9 +659,9 @@ R2 bucket: tafeng-files
 
 The binding name must be exactly `TAFENG_FILES`.
 
-### 4. The terminal does not connect to a real VPS yet.
+### 4. The terminal fails to connect or times out.
 
-This is expected for the current prototype. Real SSH/SFTP needs to be implemented in [worker/sshBridge.ts](./worker/sshBridge.ts) using Worker TCP Socket and SSH protocol logic.
+Check that the VPS IP/domain, port, username, and credentials are correct. The Worker opens an outbound TCP connection to the VPS SSH port (default 22). Make sure the VPS firewall allows inbound connections from Cloudflare IP ranges. The SSH connection timeout is 20 seconds.
 
 ### 5. Is command history isolated by VPS?
 
